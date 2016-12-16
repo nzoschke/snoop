@@ -18,8 +18,8 @@ func main() {
 }
 
 func connect() error {
-	origin := fmt.Sprintf("https://localhost:8000")
-	endpoint := fmt.Sprintf("ws://localhost:8000")
+	origin := fmt.Sprintf("https://localhost:9000")
+	endpoint := fmt.Sprintf("ws://localhost:9000")
 
 	config, err := websocket.NewConfig(endpoint, origin)
 	if err != nil {
