@@ -5,19 +5,29 @@ import (
 	"log"
 	"net"
 	"net/http"
+
+	"golang.org/x/net/websocket"
 )
 
 func websocketProxy(target string) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		fmt.Printf("PROXY SERVER\n")
 
-		dialer, err := net.Dial("tcp", "localhost:8000")
+		backend, err := net.Dial("tcp", "localhost:8000")
 		if err != nil {
 			http.Error(w, "Error contacting backend server.", 500)
 			log.Printf("Error dialing websocket backend %s: %v", target, err)
 			return
 		}
-		defer dialer.Close()
+		defer backend.Close()
+
+		snooper, err := net.Dial("tcp", "localhost:9001")
+		if err != nil {
+			http.Error(w, "Error contacting backend server.", 500)
+			log.Printf("Error dialing websocket backend %s: %v", target, err)
+			return
+		}
+		defer snooper.Close()
 
 		hj, ok := w.(http.Hijacker)
 		if !ok {
@@ -33,10 +43,13 @@ func websocketProxy(target string) http.Handler {
 		}
 		defer conn.Close()
 
+		backends := io.MultiWriter(backend, snooper)
+		clients := io.MultiWriter(conn, snooper)
+
 		// write raw HTTP request to target.
 		// NOTE: this includes proxied connection: upgrade headers with
 		//       our newly injected auth header
-		err = r.Write(dialer)
+		err = r.Write(backends)
 		if err != nil {
 			log.Printf("Error copying request to target: %v", err)
 			return
@@ -47,24 +60,36 @@ func websocketProxy(target string) http.Handler {
 		errc := make(chan error, 2)
 		cp := func(dst io.Writer, src io.Reader) {
 			_, err := io.Copy(dst, src)
+			fmt.Printf("COPY ERROR: %+v\n", err)
 			errc <- err
 		}
 
-		//hookup both sides of connection
-		go cp(dialer, conn)
-		go cp(conn, dialer)
+		// hookup both sides of connection
+		go cp(backends, conn)
+		go cp(clients, backend)
 		<-errc
 	})
 }
 
-// This example demonstrates a trivial echo server.
-func main() {
-	http.Handle("/", websocketProxy("localhost:8000"))
-	err := http.ListenAndServe(":9000", nil)
-	if err != nil {
-		panic(err)
+func SnoopServer(ws *websocket.Conn) {
+	fmt.Printf("SNOOP SERVER\n")
+	buf := make([]byte, 32*1024)
+	for {
+		nr, err := ws.Read(buf)
+		fmt.Printf("BUF: %+v\nN: %+v\nERR: %+v\n", string(buf), nr, err)
 	}
+}
 
-	// proxy := websocketProxy("localhost:8000")
-	// proxy.ServeHTTP(w, r)
+func main() {
+	snoop := &http.Server{
+		Addr:    ":9001",
+		Handler: websocket.Handler(SnoopServer),
+	}
+	go snoop.ListenAndServe()
+
+	proxy := &http.Server{
+		Addr:    ":9000",
+		Handler: websocketProxy("localhost:8000"),
+	}
+	proxy.ListenAndServe()
 }
